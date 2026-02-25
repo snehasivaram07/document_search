@@ -1,70 +1,79 @@
 import streamlit as st
 from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
-import faiss
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
-from transformers import pipeline
 
 st.set_page_config(layout="wide")
-st.title("📘 RAG Document Chatbot")
+st.title("📘 RAG Document Chatbot (TF-IDF Based)")
 
-# Load models
-@st.cache_resource
-def load_models():
-    embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-    generator = pipeline("text2text-generation", model="google/flan-t5-base")
-    return embed_model, generator
-
-embed_model, generator = load_models()
-
-# Extract PDF text
+# --------------- PDF PROCESSING ---------------
 def extract_text(pdf_file):
     reader = PdfReader(pdf_file)
     text = ""
     for page in reader.pages:
-        if page.extract_text():
-            text += page.extract_text()
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text + "\n"
     return text
 
-# Chunk text
-def chunk_text(text, chunk_size=500):
+
+def chunk_text(text, chunk_size=600):
     chunks = []
     for i in range(0, len(text), chunk_size):
-        chunks.append(text[i:i+chunk_size])
+        chunk = text[i:i + chunk_size].strip()
+        if chunk:
+            chunks.append(chunk)
     return chunks
 
-# Sidebar upload
+
+# --------------- SIDEBAR: UPLOAD ---------------
 uploaded_file = st.sidebar.file_uploader("Upload PDF", type=["pdf"])
 
 if uploaded_file:
     text = extract_text(uploaded_file)
-    chunks = chunk_text(text)
 
-    embeddings = embed_model.encode(chunks)
-    dimension = embeddings.shape[1]
+    if not text.strip():
+        st.error("Couldn't extract any text from this PDF.")
+    else:
+        chunks = chunk_text(text)
 
-    index = faiss.IndexFlatL2(dimension)
-    index.add(np.array(embeddings))
+        # Fit TF-IDF on document chunks
+        vectorizer = TfidfVectorizer(stop_words="english")
+        tfidf_matrix = vectorizer.fit_transform(chunks)
 
-    st.sidebar.success("Document indexed successfully!")
+        st.sidebar.success(f"Document indexed successfully with {len(chunks)} chunks ✅")
 
-    query = st.text_input("Ask a question from the document")
+        # --------------- QUESTION INPUT ---------------
+        query = st.text_input("Ask a question from the document")
 
-    if query:
-        query_vector = embed_model.encode([query])
-        distances, indices = index.search(np.array(query_vector), k=3)
+        if query:
+            # Vectorize query
+            query_vec = vectorizer.transform([query])
 
-        context = " ".join([chunks[i] for i in indices[0]])
+            # Cosine similarity between query and all chunks
+            scores = cosine_similarity(query_vec, tfidf_matrix)[0]
 
-        prompt = f"""
-        Answer the question using only the context below.
+            # Top 3 most relevant chunks
+            top_k = 3
+            top_indices = np.argsort(scores)[::-1][:top_k]
 
-        Context:
-        {context}
+            relevant_chunks = []
+            for idx in top_indices:
+                if scores[idx] > 0:
+                    relevant_chunks.append(chunks[idx])
 
-        Question:
-        {query}
-        """
+            if relevant_chunks:
+                st.subheader("Answer from document:")
+                # Just join the best chunks as the answer
+                st.write(" ".join(relevant_chunks))
 
-        result = generator(prompt, max_length=256)
-        st.write(result[0]["generated_text"])
+                with st.expander("Show supporting context"):
+                    for i, c in enumerate(relevant_chunks, start=1):
+                        st.markdown(f"**Chunk {i}:**")
+                        st.write(c)
+                        st.markdown("---")
+            else:
+                st.warning("I couldn't find anything relevant to your question in this document.")
+else:
+    st.info("📄 Please upload a PDF from the sidebar to start.")
